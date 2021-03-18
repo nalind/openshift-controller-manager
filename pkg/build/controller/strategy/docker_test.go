@@ -86,11 +86,14 @@ func TestDockerCreateBuildPod(t *testing.T) {
 	// build-system-config
 	// certificate authorities
 	// container storage
+	// container run
+	// subuid
+	// subgid
 	// blobs content cache
 	// global CA injection configmap
 	// node pull secrets
-	if len(container.VolumeMounts) != 12 {
-		t.Fatalf("Expected 12 volumes in container, got %d", len(container.VolumeMounts))
+	if len(container.VolumeMounts) != 15 {
+		t.Fatalf("Expected 15 volumes in container, got %d", len(container.VolumeMounts))
 	}
 	if *actual.Spec.ActiveDeadlineSeconds != 60 {
 		t.Errorf("Expected ActiveDeadlineSeconds 60, got %d", *actual.Spec.ActiveDeadlineSeconds)
@@ -105,7 +108,10 @@ func TestDockerCreateBuildPod(t *testing.T) {
 		ConfigMapBuildSystemConfigsMountPath,
 		ConfigMapCertsMountPath,
 		ConfigMapBuildGlobalCAMountPath,
-		"/var/lib/containers/storage",
+		"/var/lib/containers",
+		"/var/run/containers",
+		"/etc/subuid",
+		"/etc/subgid",
 		buildutil.BuildBlobsContentCache,
 	}
 	for i, expected := range expectedMounts {
@@ -114,8 +120,8 @@ func TestDockerCreateBuildPod(t *testing.T) {
 		}
 	}
 	// build pod has an extra volume: the git clone source secret
-	if len(actual.Spec.Volumes) != 13 {
-		t.Fatalf("Expected 13 volumes in Build pod, got %d", len(actual.Spec.Volumes))
+	if len(actual.Spec.Volumes) != 15 {
+		t.Fatalf("Expected 15 volumes in Build pod, got %d", len(actual.Spec.Volumes))
 	}
 	if !kapihelper.Semantic.DeepEqual(container.Resources, build.Spec.Resources) {
 		t.Fatalf("Expected actual=expected, %v != %v", container.Resources, build.Spec.Resources)

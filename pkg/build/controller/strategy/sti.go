@@ -69,7 +69,20 @@ func (bs *SourceBuildStrategy) CreateBuildPod(build *buildv1.Build, additionalCA
 	}
 
 	hostPathFile := corev1.HostPathFile
-	privileged := true
+	securityContext := func() *corev1.SecurityContext {
+		privileged := false
+		return &corev1.SecurityContext{
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{
+					"CAP_KILL",
+					"CAP_MKNOD",
+				},
+			},
+			Privileged: &privileged,
+		}
+	}
+	secretsMode := int32(0640)    // TODO: set to corev1.SecretVolumeSourceDefaultMode?
+	configMapsMode := int32(0644) // TODO: set to corev1.ConfigMapVolumeSourceDefaultMode?
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      buildutil.GetBuildPodName(build),
@@ -80,14 +93,11 @@ func (bs *SourceBuildStrategy) CreateBuildPod(build *buildv1.Build, additionalCA
 			ServiceAccountName: serviceAccount,
 			Containers: []corev1.Container{
 				{
-					Name:  StiBuild,
-					Image: bs.Image,
-					Args:  []string{"openshift-sti-build"},
-					Env:   copyEnvVarSlice(containerEnv),
-					// TODO: run unprivileged https://github.com/openshift/origin/issues/662
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: &privileged,
-					},
+					Name:                     StiBuild,
+					Image:                    bs.Image,
+					Args:                     []string{"openshift-sti-build"},
+					Env:                      copyEnvVarSlice(containerEnv),
+					SecurityContext:          securityContext(),
 					TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 					VolumeMounts: []corev1.VolumeMount{
 						{
@@ -141,6 +151,7 @@ func (bs *SourceBuildStrategy) CreateBuildPod(build *buildv1.Build, additionalCA
 			Image:                    bs.Image,
 			Args:                     []string{"openshift-git-clone"},
 			Env:                      copyEnvVarSlice(containerEnv),
+			SecurityContext:          securityContext(),
 			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 			VolumeMounts: []corev1.VolumeMount{
 				{
@@ -155,19 +166,16 @@ func (bs *SourceBuildStrategy) CreateBuildPod(build *buildv1.Build, additionalCA
 			gitCloneContainer.Stdin = true
 			gitCloneContainer.StdinOnce = true
 		}
-		setupSourceSecrets(pod, &gitCloneContainer, build.Spec.Source.SourceSecret)
+		setupSourceSecrets(pod, &gitCloneContainer, build.Spec.Source.SourceSecret, secretsMode)
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, gitCloneContainer)
 	}
 	if len(build.Spec.Source.Images) > 0 {
 		extractImageContentContainer := corev1.Container{
-			Name:  ExtractImageContentContainer,
-			Image: bs.Image,
-			Args:  []string{"openshift-extract-image-content"},
-			Env:   copyEnvVarSlice(containerEnv),
-			// TODO: run unprivileged https://github.com/openshift/origin/issues/662
-			SecurityContext: &corev1.SecurityContext{
-				Privileged: &privileged,
-			},
+			Name:                     ExtractImageContentContainer,
+			Image:                    bs.Image,
+			Args:                     []string{"openshift-extract-image-content"},
+			Env:                      copyEnvVarSlice(containerEnv),
+			SecurityContext:          securityContext(),
 			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 			VolumeMounts: []corev1.VolumeMount{
 				{
@@ -186,7 +194,7 @@ func (bs *SourceBuildStrategy) CreateBuildPod(build *buildv1.Build, additionalCA
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			Resources:       build.Spec.Resources,
 		}
-		setupDockerSecrets(pod, &extractImageContentContainer, build.Spec.Output.PushSecret, strategy.PullSecret, build.Spec.Source.Images)
+		setupDockerSecrets(pod, &extractImageContentContainer, build.Spec.Output.PushSecret, strategy.PullSecret, build.Spec.Source.Images, secretsMode)
 		setupContainersStorage(pod, &extractImageContentContainer)
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, extractImageContentContainer)
 	}
@@ -196,6 +204,7 @@ func (bs *SourceBuildStrategy) CreateBuildPod(build *buildv1.Build, additionalCA
 			Image:                    bs.Image,
 			Args:                     []string{"openshift-manage-dockerfile"},
 			Env:                      copyEnvVarSlice(containerEnv),
+			SecurityContext:          securityContext(),
 			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 			VolumeMounts: []corev1.VolumeMount{
 				{
@@ -211,19 +220,21 @@ func (bs *SourceBuildStrategy) CreateBuildPod(build *buildv1.Build, additionalCA
 	pod = setupActiveDeadline(pod, build)
 
 	setOwnerReference(pod, build)
-	setupDockerSecrets(pod, &pod.Spec.Containers[0], build.Spec.Output.PushSecret, strategy.PullSecret, build.Spec.Source.Images)
+	setupDockerSecrets(pod, &pod.Spec.Containers[0], build.Spec.Output.PushSecret, strategy.PullSecret, build.Spec.Source.Images, secretsMode)
 	// For any secrets the user wants to reference from their Assemble script or Dockerfile, mount those
 	// secrets into the main container.  The main container includes logic to copy them from the mounted
 	// location into the working directory.
 	// TODO: consider moving this into the git-clone container and doing the secret copying there instead.
-	setupInputSecrets(pod, &pod.Spec.Containers[0], build.Spec.Source.Secrets)
-	setupInputConfigMaps(pod, &pod.Spec.Containers[0], build.Spec.Source.ConfigMaps)
+	setupInputSecrets(pod, &pod.Spec.Containers[0], build.Spec.Source.Secrets, secretsMode)
+	setupInputConfigMaps(pod, &pod.Spec.Containers[0], build.Spec.Source.ConfigMaps, configMapsMode)
 	setupContainersConfigs(build, pod)
 	setupBuildCAs(build, pod, additionalCAs, internalRegistryHost)
-	setupContainersStorage(pod, &pod.Spec.Containers[0]) // for unprivileged builds
-	// setupContainersNodeStorage(pod, &pod.Spec.Containers[0]) // for privileged builds
+	setupContainersStorage(pod, &pod.Spec.Containers[0])
+	if err = setupBuilderUnprivilegedUser(bs.KubeClient, build, pod); err != nil {
+		return nil, err
+	}
 	setupBlobCache(pod)
-	if err := setupBuildVolumes(pod, build.Spec.Strategy.SourceStrategy.Volumes); err != nil {
+	if err := setupBuildVolumes(pod, build.Spec.Strategy.SourceStrategy.Volumes, configMapsMode, secretsMode); err != nil {
 		return pod, err
 	}
 	return pod, nil

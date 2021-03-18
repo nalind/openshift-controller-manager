@@ -96,7 +96,8 @@ func TestSetupDockerSecrets(t *testing.T) {
 		{PullSecret: &corev1.LocalObjectReference{Name: "imageSourceSecret1"}},
 	}
 
-	setupDockerSecrets(&pod, &pod.Spec.Containers[0], pushSecret, pullSecret, imageSources)
+	secretsMode := int32(0640)
+	setupDockerSecrets(&pod, &pod.Spec.Containers[0], pushSecret, pullSecret, imageSources, secretsMode)
 
 	if len(pod.Spec.Volumes) != 4 {
 		t.Fatalf("Expected 4 volumes, got: %#v", pod.Spec.Volumes)
@@ -212,8 +213,10 @@ func TestMountConfigsAndSecrets(t *testing.T) {
 			DestinationDir: "secret/path",
 		},
 	}
-	setupInputConfigMaps(&pod, &pod.Spec.Containers[0], configs)
-	setupInputSecrets(&pod, &pod.Spec.Containers[0], secrets)
+	configMapsMode := int32(0644)
+	secretsMode := int32(0640)
+	setupInputConfigMaps(&pod, &pod.Spec.Containers[0], configs, configMapsMode)
+	setupInputSecrets(&pod, &pod.Spec.Containers[0], secrets, secretsMode)
 	if len(pod.Spec.Volumes) != 4 {
 		t.Fatalf("Expected 4 volumes, got: %#v", pod.Spec.Volumes)
 	}
@@ -527,6 +530,8 @@ func TestSetupBuildVolumes(t *testing.T) {
 	}
 
 	var defaultMode int32 = 0600
+	var defaultConfigMapsMode int32 = 0600
+	var defaultSecretsMode int32 = 0600
 	var UnSupportedBuildVolumeType buildv1.BuildVolumeSourceType = "UnSupportedBuildVolumeType"
 
 	tests := []struct {
@@ -719,7 +724,7 @@ func TestSetupBuildVolumes(t *testing.T) {
 				p.Spec.Containers[0].VolumeMounts = append(p.Spec.Containers[0].VolumeMounts, tt.StartingVolumeMounts...)
 			}
 
-			err := setupBuildVolumes(p, tt.BuildVolumes)
+			err := setupBuildVolumes(p, tt.BuildVolumes, defaultConfigMapsMode, defaultSecretsMode)
 
 			if err == nil && tt.ShouldFail {
 				t.Errorf("test %q should have failed with error %q, but didn't", tt.Name, tt.ErrorMessage)

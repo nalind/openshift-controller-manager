@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -8,13 +9,16 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/openshift/library-go/pkg/security/uid"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kvalidation "k8s.io/apimachinery/pkg/util/validation"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/apis/policy"
 
 	buildv1 "github.com/openshift/api/build/v1"
+	securityv1 "github.com/openshift/api/security/v1"
 	"github.com/openshift/library-go/pkg/build/naming"
 	"github.com/openshift/library-go/pkg/image/reference"
 	buildutil "github.com/openshift/openshift-controller-manager/pkg/build/buildutil"
@@ -113,14 +117,14 @@ func setupDockerSocket(pod *corev1.Pod) {
 
 // mountConfigMapVolume is a helper method responsible for actual mounting configMap
 // volumes into a pod.
-func mountConfigMapVolume(pod *corev1.Pod, container *corev1.Container, configMapName, mountPath, volumeSuffix string, volumeSource *corev1.VolumeSource) {
-	mountVolume(pod, container, configMapName, mountPath, volumeSuffix, policy.ConfigMap, volumeSource)
+func mountConfigMapVolume(pod *corev1.Pod, container *corev1.Container, configMapName, mountPath, volumeSuffix string, volumeSource *corev1.VolumeSource, configMapMode int32) {
+	mountVolume(pod, container, configMapName, mountPath, volumeSuffix, policy.ConfigMap, volumeSource, configMapMode)
 }
 
 // mountSecretVolume is a helper method responsible for actual mounting secret
 // volumes into a pod.
-func mountSecretVolume(pod *corev1.Pod, container *corev1.Container, secretName, mountPath, volumeSuffix string, volumeSource *corev1.VolumeSource) {
-	mountVolume(pod, container, secretName, mountPath, volumeSuffix, policy.Secret, volumeSource)
+func mountSecretVolume(pod *corev1.Pod, container *corev1.Container, secretName, mountPath, volumeSuffix string, volumeSource *corev1.VolumeSource, secretMode int32) {
+	mountVolume(pod, container, secretName, mountPath, volumeSuffix, policy.Secret, volumeSource, secretMode)
 }
 
 // mountVolume is a helper method responsible for mounting volumes into a pod.
@@ -129,7 +133,7 @@ func mountSecretVolume(pod *corev1.Pod, container *corev1.Container, secretName,
 // 1. ConfigMap
 // 2. EmptyDir
 // 3. Secret
-func mountVolume(pod *corev1.Pod, container *corev1.Container, objName, mountPath, volumeSuffix string, fsType policy.FSType, volumeSource *corev1.VolumeSource) {
+func mountVolume(pod *corev1.Pod, container *corev1.Container, objName, mountPath, volumeSuffix string, fsType policy.FSType, volumeSource *corev1.VolumeSource, mode int32) {
 	volumeName := naming.GetName(objName, volumeSuffix, kvalidation.DNS1123LabelMaxLength)
 
 	// coerce from RFC1123 subdomain to RFC1123 label.
@@ -142,7 +146,6 @@ func mountVolume(pod *corev1.Pod, container *corev1.Container, objName, mountPat
 			break
 		}
 	}
-	mode := int32(0600)
 	if !volumeExists {
 		volume := makeVolume(volumeName, objName, mode, fsType, volumeSource)
 		pod.Spec.Volumes = append(pod.Spec.Volumes, volume)
@@ -199,9 +202,9 @@ func makeVolume(volumeName, refName string, mode int32, fsType policy.FSType, vo
 
 // setupDockerSecrets mounts Docker Registry secrets into Pod running the build,
 // allowing Docker to authenticate against private registries or Docker Hub.
-func setupDockerSecrets(pod *corev1.Pod, container *corev1.Container, pushSecret, pullSecret *corev1.LocalObjectReference, imageSources []buildv1.ImageSource) {
+func setupDockerSecrets(pod *corev1.Pod, container *corev1.Container, pushSecret, pullSecret *corev1.LocalObjectReference, imageSources []buildv1.ImageSource, secretsMode int32) {
 	if pushSecret != nil {
-		mountSecretVolume(pod, container, pushSecret.Name, DockerPushSecretMountPath, "push", nil)
+		mountSecretVolume(pod, container, pushSecret.Name, DockerPushSecretMountPath, "push", nil, secretsMode)
 		container.Env = append(container.Env, []corev1.EnvVar{
 			{Name: "PUSH_DOCKERCFG_PATH", Value: DockerPushSecretMountPath},
 		}...)
@@ -209,7 +212,7 @@ func setupDockerSecrets(pod *corev1.Pod, container *corev1.Container, pushSecret
 	}
 
 	if pullSecret != nil {
-		mountSecretVolume(pod, container, pullSecret.Name, DockerPullSecretMountPath, "pull", nil)
+		mountSecretVolume(pod, container, pullSecret.Name, DockerPullSecretMountPath, "pull", nil, secretsMode)
 		container.Env = append(container.Env, []corev1.EnvVar{
 			{Name: "PULL_DOCKERCFG_PATH", Value: DockerPullSecretMountPath},
 		}...)
@@ -221,7 +224,7 @@ func setupDockerSecrets(pod *corev1.Pod, container *corev1.Container, pushSecret
 			continue
 		}
 		mountPath := filepath.Join(SourceImagePullSecretMountPath, strconv.Itoa(i))
-		mountSecretVolume(pod, container, imageSource.PullSecret.Name, mountPath, fmt.Sprintf("%s%d", "source-image", i), nil)
+		mountSecretVolume(pod, container, imageSource.PullSecret.Name, mountPath, fmt.Sprintf("%s%d", "source-image", i), nil, secretsMode)
 		container.Env = append(container.Env, []corev1.EnvVar{
 			{Name: fmt.Sprintf("%s%d", "PULL_SOURCE_DOCKERCFG_PATH_", i), Value: mountPath},
 		}...)
@@ -231,12 +234,12 @@ func setupDockerSecrets(pod *corev1.Pod, container *corev1.Container, pushSecret
 
 // setupSourceSecrets mounts SSH key used for accessing private SCM to clone
 // application source code during build.
-func setupSourceSecrets(pod *corev1.Pod, container *corev1.Container, sourceSecret *corev1.LocalObjectReference) {
+func setupSourceSecrets(pod *corev1.Pod, container *corev1.Container, sourceSecret *corev1.LocalObjectReference, secretsMode int32) {
 	if sourceSecret == nil {
 		return
 	}
 
-	mountSecretVolume(pod, container, sourceSecret.Name, sourceSecretMountPath, "source", nil)
+	mountSecretVolume(pod, container, sourceSecret.Name, sourceSecretMountPath, "source", nil, secretsMode)
 	klog.V(3).Infof("Installed source secrets in %s, in Pod %s/%s", sourceSecretMountPath, pod.Namespace, pod.Name)
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{Name: "SOURCE_SECRET_PATH", Value: sourceSecretMountPath},
@@ -245,18 +248,18 @@ func setupSourceSecrets(pod *corev1.Pod, container *corev1.Container, sourceSecr
 
 // setupInputConfigMaps mounts the configMaps referenced by the ConfigMapBuildSource
 // into a builder container.
-func setupInputConfigMaps(pod *corev1.Pod, container *corev1.Container, configs []buildv1.ConfigMapBuildSource) {
+func setupInputConfigMaps(pod *corev1.Pod, container *corev1.Container, configs []buildv1.ConfigMapBuildSource, configMapsMode int32) {
 	for _, c := range configs {
-		mountConfigMapVolume(pod, container, c.ConfigMap.Name, filepath.Join(ConfigMapBuildSourceBaseMountPath, c.ConfigMap.Name), "build", nil)
+		mountConfigMapVolume(pod, container, c.ConfigMap.Name, filepath.Join(ConfigMapBuildSourceBaseMountPath, c.ConfigMap.Name), "build", nil, configMapsMode)
 		klog.V(3).Infof("%s will be used as a build config in %s", c.ConfigMap.Name, ConfigMapBuildSourceBaseMountPath)
 	}
 }
 
 // setupInputSecrets mounts the secrets referenced by the SecretBuildSource
 // into a builder container.
-func setupInputSecrets(pod *corev1.Pod, container *corev1.Container, secrets []buildv1.SecretBuildSource) {
+func setupInputSecrets(pod *corev1.Pod, container *corev1.Container, secrets []buildv1.SecretBuildSource, secretsMode int32) {
 	for _, s := range secrets {
-		mountSecretVolume(pod, container, s.Secret.Name, filepath.Join(SecretBuildSourceBaseMountPath, s.Secret.Name), "build", nil)
+		mountSecretVolume(pod, container, s.Secret.Name, filepath.Join(SecretBuildSourceBaseMountPath, s.Secret.Name), "build", nil, secretsMode)
 		klog.V(3).Infof("%s will be used as a build secret in %s", s.Secret.Name, SecretBuildSourceBaseMountPath)
 	}
 }
@@ -332,9 +335,9 @@ func setupActiveDeadline(pod *corev1.Pod, build *buildv1.Build) *corev1.Pod {
 }
 
 // setupAdditionalSecrets creates secret volume mounts in the given pod for the given list of secrets
-func setupAdditionalSecrets(pod *corev1.Pod, container *corev1.Container, secrets []buildv1.SecretSpec) {
+func setupAdditionalSecrets(pod *corev1.Pod, container *corev1.Container, secrets []buildv1.SecretSpec, secretsMode int32) {
 	for _, secretSpec := range secrets {
-		mountSecretVolume(pod, container, secretSpec.SecretSource.Name, secretSpec.MountPath, "secret", nil)
+		mountSecretVolume(pod, container, secretSpec.SecretSource.Name, secretSpec.MountPath, "secret", nil, secretsMode)
 		klog.V(3).Infof("Installed additional secret in %s, in Pod %s/%s", secretSpec.MountPath, pod.Namespace, pod.Name)
 	}
 }
@@ -453,17 +456,19 @@ func updateConfigsForContainer(c corev1.Container, volumeName string, configDir 
 	return c
 }
 
-// setupContainersStorage creates a volume that we'll use for holding images and working
+// setupContainersStorage creates volumes that we'll use for holding images and working
 // root filesystems for building images.
 func setupContainersStorage(pod *corev1.Pod, container *corev1.Container) {
-	exists := false
+	rootExists, runExists := false, false
 	for _, v := range pod.Spec.Volumes {
 		if v.Name == "container-storage-root" {
-			exists = true
-			break
+			rootExists = true
+		}
+		if v.Name == "container-storage-run" {
+			runExists = true
 		}
 	}
-	if !exists {
+	if !rootExists {
 		pod.Spec.Volumes = append(pod.Spec.Volumes,
 			corev1.Volume{
 				Name: "container-storage-root",
@@ -473,45 +478,26 @@ func setupContainersStorage(pod *corev1.Pod, container *corev1.Container) {
 			},
 		)
 	}
-	container.VolumeMounts = append(container.VolumeMounts,
-		corev1.VolumeMount{
-			Name:      "container-storage-root",
-			MountPath: "/var/lib/containers/storage",
-		},
-	)
-}
-
-// setupContainersNodeStorage borrows the appropriate storage directories from the node so
-// that we can share layers that we're using with the node
-func setupContainersNodeStorage(pod *corev1.Pod, container *corev1.Container) {
-	exists := false
-	for _, v := range pod.Spec.Volumes {
-		if v.Name == "node-storage-root" {
-			exists = true
-			break
-		}
-	}
-	if !exists {
+	if !runExists {
 		pod.Spec.Volumes = append(pod.Spec.Volumes,
-			// TODO: run unprivileged https://github.com/openshift/origin/issues/662
 			corev1.Volume{
-				Name: "node-storage-root",
+				Name: "container-storage-run",
 				VolumeSource: corev1.VolumeSource{
-					HostPath: &corev1.HostPathVolumeSource{
-						Path: "/var/lib/containers/storage",
-					},
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
 				},
 			},
 		)
 	}
 	container.VolumeMounts = append(container.VolumeMounts,
-		// TODO: run unprivileged https://github.com/openshift/origin/issues/662
 		corev1.VolumeMount{
-			Name:      "node-storage-root",
-			MountPath: "/var/lib/containers/storage",
+			Name:      "container-storage-root",
+			MountPath: "/var/lib/containers",
+		},
+		corev1.VolumeMount{
+			Name:      "container-storage-run",
+			MountPath: "/var/run/containers",
 		},
 	)
-	container.Env = append(container.Env, corev1.EnvVar{Name: "BUILD_STORAGE_DRIVER", Value: "overlay"})
 }
 
 func addVolumeMountToContainers(conts []corev1.Container, mount corev1.VolumeMount) []corev1.Container {
@@ -521,6 +507,156 @@ func addVolumeMountToContainers(conts []corev1.Container, mount corev1.VolumeMou
 		containers[i] = c
 	}
 	return containers
+}
+
+// Add the namespace's ID ranges as annotations, use the downward API to make
+// them appear as /etc/subuid and /etc/subgid in the build pod's containers,
+// and set the RunAsUser and fsGroup to the first UID and the first GID from
+// the namespace's ID ranges.
+func setupBuilderUnprivilegedUser(kubeClient *clientset.Clientset, build *buildv1.Build, pod *corev1.Pod) error {
+	var fsGroup *int64
+
+	uidmap, gidmap, err := getNamespaceRanges(kubeClient, build, pod)
+	if err != nil {
+		return err
+	}
+
+	// Use the first UID assigned to the namespaces as our runAsUser, and
+	// set the range as being available to the user in the subuid
+	// annotation.
+	runAsUser := int64(uidmap[0])
+	subuid := fmt.Sprintf("%d:%d:%d\n", runAsUser, uidmap[0], uidmap[1])
+	metav1.SetMetaDataAnnotation(&pod.ObjectMeta, "openshift.io/subuid", subuid)
+
+	// Format the group ID ranges.
+	subgid := ""
+	for _, gidmapPiece := range gidmap {
+		// Save the first GID in the first range, for use as the pod's fs group.
+		if fsGroup == nil {
+			gid := int64(gidmapPiece[0])
+			fsGroup = &gid
+		}
+		// Set this range as also being available to the user in the subgid annotation.
+		subgid = subgid + fmt.Sprintf("%d:%d:%d\n", runAsUser, gidmapPiece[0], gidmapPiece[1])
+	}
+	metav1.SetMetaDataAnnotation(&pod.ObjectMeta, "openshift.io/subgid", subgid)
+
+	// Create a volume based on the annotations we just added.
+	subidMode := int32(0444)
+	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+		Name: "idmaps",
+		VolumeSource: corev1.VolumeSource{
+			DownwardAPI: &corev1.DownwardAPIVolumeSource{
+				Items: []corev1.DownwardAPIVolumeFile{
+					{
+						Path: "subuid",
+						Mode: &subidMode,
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.annotations['openshift.io/subuid']",
+						},
+					},
+					{
+						Path: "subgid",
+						Mode: &subidMode,
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.annotations['openshift.io/subgid']",
+						},
+					},
+				},
+			},
+		},
+	})
+
+	// Mount the annotation file items into /etc in our pod's containers.
+	subuidVolumeMount := corev1.VolumeMount{
+		Name:      "idmaps",
+		MountPath: "/etc/subuid",
+		SubPath:   "subuid",
+		ReadOnly:  true,
+	}
+	subgidVolumeMount := corev1.VolumeMount{
+		Name:      "idmaps",
+		MountPath: "/etc/subgid",
+		SubPath:   "subgid",
+		ReadOnly:  true,
+	}
+
+	// Set the fsGroup for the pod.
+	if fsGroup != nil {
+		if pod.Spec.SecurityContext != nil {
+			pod.Spec.SecurityContext.FSGroup = fsGroup
+		} else {
+			pod.Spec.SecurityContext = &corev1.PodSecurityContext{
+				FSGroup: fsGroup,
+			}
+		}
+	}
+
+	// Set the RunAsUser to the namespace's first UID for all of the containers in the pod.
+	for i := range pod.Spec.InitContainers {
+		pod.Spec.InitContainers[i].SecurityContext.RunAsUser = &runAsUser
+		pod.Spec.InitContainers[i].VolumeMounts = append(pod.Spec.InitContainers[i].VolumeMounts, subuidVolumeMount, subgidVolumeMount)
+	}
+	for i := range pod.Spec.Containers {
+		pod.Spec.Containers[i].SecurityContext.RunAsUser = &runAsUser
+		pod.Spec.Containers[i].VolumeMounts = append(pod.Spec.Containers[i].VolumeMounts, subuidVolumeMount, subgidVolumeMount)
+	}
+	return nil
+}
+
+// Parse the UID and supplemental group range annotations from the client's
+// namespace, and return them in the form "(UidRangeStart,UidRangeSize)" and
+// "(GidRangeStart,GidRangeSize)[,...]".
+func getNamespaceRanges(kubeClient *clientset.Clientset, build *buildv1.Build, pod *corev1.Pod) ([2]uint32, [][2]uint32, error) {
+	var uidmap [2]uint32
+	var gidmap [][2]uint32
+
+	if kubeClient == nil || kubeClient.CoreV1() == nil {
+		// if you get ranges of size=1 back, something's probably gone wrong
+		return [2]uint32{0xffffffff, 1}, [][2]uint32{{0xffffffff, 1}}, nil
+	}
+
+	// Look up the ID ranges allocated for the namespace in which we're operating.
+	namespace, err := kubeClient.CoreV1().Namespaces().Get(context.TODO(), build.Namespace, metav1.GetOptions{})
+	if err != nil {
+		return uidmap, gidmap, fmt.Errorf("failed to read configuration of namespace %s for build %s: %v", build.Namespace, build.Name, err)
+	}
+	// Parse a single UID block.
+	if group, ok := namespace.Annotations[securityv1.UIDRangeAnnotation]; ok {
+		// Parse it into a block.
+		uidBlock, err := uid.ParseBlock(group)
+		if err != nil {
+			return uidmap, gidmap, fmt.Errorf("failed to parse UID block %q for namespace %s for build %s", group, build.Namespace, build.Name)
+		}
+		// Format that block into a "rangeStart:rangeSize" string.
+		size := uidBlock.End - uidBlock.Start + 1
+		uidmap = [2]uint32{uidBlock.Start, size}
+	} else {
+		return uidmap, gidmap, fmt.Errorf("failed to find UID range annotation %q for namespace %s for build %s", securityv1.UIDRangeAnnotation, build.Namespace, build.Name)
+	}
+	// Parse one or more GID blocks.
+	if groups, ok := namespace.Annotations[securityv1.SupplementalGroupsAnnotation]; ok {
+		for _, group := range strings.Split(groups, ",") {
+			if group == "" {
+				continue
+			}
+			// Parse it into a block.
+			gidBlock, err := uid.ParseBlock(group)
+			if err != nil {
+				return uidmap, gidmap, fmt.Errorf("failed to parse GID block %q for namespace %s for build %s", group, build.Namespace, build.Name)
+			}
+			// Format that block into part of an ID mapping configuration that includes that block.
+			size := gidBlock.End - gidBlock.Start + 1
+			if len(gidmap) == 0 {
+				gidmap = [][2]uint32{{gidBlock.Start, size}}
+			} else {
+				gidmap = append(gidmap, [2]uint32{gidBlock.Start, size})
+			}
+		}
+	} else {
+		return uidmap, gidmap, fmt.Errorf("failed to find supplemental groups annotation %q for namespace %s for build %s", securityv1.SupplementalGroupsAnnotation, build.Namespace, build.Name)
+	}
+	return uidmap, gidmap, nil
 }
 
 // setupBuildCAs mounts certificate authorities for the build from a predetermined ConfigMap.
@@ -667,7 +803,7 @@ func setupBlobCache(pod *corev1.Pod) {
 }
 
 // setupBuildVolumes sets up user defined BuildVolumes
-func setupBuildVolumes(pod *corev1.Pod, buildVolumes []buildv1.BuildVolume) error {
+func setupBuildVolumes(pod *corev1.Pod, buildVolumes []buildv1.BuildVolume, configMapsMode, secretsMode int32) error {
 	// if there are no BuildVolumes or the pod is nil,
 	// there is no processing needed, so just return quickly
 	if len(buildVolumes) == 0 || pod == nil {
@@ -698,10 +834,10 @@ func setupBuildVolumes(pod *corev1.Pod, buildVolumes []buildv1.BuildVolume) erro
 		switch buildVolume.Source.Type {
 		case buildv1.BuildVolumeSourceTypeSecret:
 			volumeSource.Secret = buildVolume.Source.Secret
-			mountSecretVolume(pod, &pod.Spec.Containers[0], strings.ToLower(buildVolume.Source.Secret.SecretName), PathForBuildVolume(buildVolume.Source.Secret.SecretName), buildVolumeSuffix, &volumeSource)
+			mountSecretVolume(pod, &pod.Spec.Containers[0], strings.ToLower(buildVolume.Source.Secret.SecretName), PathForBuildVolume(buildVolume.Source.Secret.SecretName), buildVolumeSuffix, &volumeSource, secretsMode)
 		case buildv1.BuildVolumeSourceTypeConfigMap:
 			volumeSource.ConfigMap = buildVolume.Source.ConfigMap
-			mountConfigMapVolume(pod, &pod.Spec.Containers[0], strings.ToLower(buildVolume.Source.ConfigMap.Name), PathForBuildVolume(buildVolume.Source.ConfigMap.Name), buildVolumeSuffix, &volumeSource)
+			mountConfigMapVolume(pod, &pod.Spec.Containers[0], strings.ToLower(buildVolume.Source.ConfigMap.Name), PathForBuildVolume(buildVolume.Source.ConfigMap.Name), buildVolumeSuffix, &volumeSource, configMapsMode)
 		default:
 			return fmt.Errorf("encountered unsupported build volume source type %q", buildVolume.Source.Type)
 		}

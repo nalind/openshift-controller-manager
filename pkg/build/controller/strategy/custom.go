@@ -90,7 +90,19 @@ func (bs *CustomBuildStrategy) CreateBuildPod(build *buildv1.Build, additionalCA
 		serviceAccount = buildutil.BuilderServiceAccountName
 	}
 
-	privileged := true
+	securityContext := func() *corev1.SecurityContext {
+		privileged := false
+		return &corev1.SecurityContext{
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{
+					"CAP_KILL",
+					"CAP_MKNOD",
+				},
+			},
+			Privileged: &privileged,
+		}
+	}
+	secretsMode := int32(0640) // TODO: set to corev1.SecretVolumeSourceDefaultMode?
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      buildutil.GetBuildPodName(build),
@@ -101,13 +113,10 @@ func (bs *CustomBuildStrategy) CreateBuildPod(build *buildv1.Build, additionalCA
 			ServiceAccountName: serviceAccount,
 			Containers: []corev1.Container{
 				{
-					Name:  CustomBuild,
-					Image: strategy.From.Name,
-					Env:   containerEnv,
-					// TODO: run unprivileged https://github.com/openshift/origin/issues/662
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: &privileged,
-					},
+					Name:                     CustomBuild,
+					Image:                    strategy.From.Name,
+					Env:                      containerEnv,
+					SecurityContext:          securityContext(),
 					TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 				},
 			},
@@ -133,13 +142,16 @@ func (bs *CustomBuildStrategy) CreateBuildPod(build *buildv1.Build, additionalCA
 	if strategy.ExposeDockerSocket {
 		setupDockerSocket(pod)
 	}
-	setupDockerSecrets(pod, &pod.Spec.Containers[0], build.Spec.Output.PushSecret, strategy.PullSecret, build.Spec.Source.Images)
+	setupDockerSecrets(pod, &pod.Spec.Containers[0], build.Spec.Output.PushSecret, strategy.PullSecret, build.Spec.Source.Images, secretsMode)
 	setOwnerReference(pod, build)
-	setupSourceSecrets(pod, &pod.Spec.Containers[0], build.Spec.Source.SourceSecret)
-	setupInputSecrets(pod, &pod.Spec.Containers[0], build.Spec.Source.Secrets)
-	setupAdditionalSecrets(pod, &pod.Spec.Containers[0], build.Spec.Strategy.CustomStrategy.Secrets)
+	setupSourceSecrets(pod, &pod.Spec.Containers[0], build.Spec.Source.SourceSecret, secretsMode)
+	setupInputSecrets(pod, &pod.Spec.Containers[0], build.Spec.Source.Secrets, secretsMode)
+	setupAdditionalSecrets(pod, &pod.Spec.Containers[0], build.Spec.Strategy.CustomStrategy.Secrets, secretsMode)
 	setupContainersConfigs(build, pod)
 	setupBuildCAs(build, pod, additionalCAs, internalRegistryHost)
-	setupContainersStorage(pod, &pod.Spec.Containers[0]) // for unprivileged builds
+	setupContainersStorage(pod, &pod.Spec.Containers[0])
+	if err = setupBuilderUnprivilegedUser(bs.KubeClient, build, pod); err != nil {
+		return nil, err
+	}
 	return pod, nil
 }
