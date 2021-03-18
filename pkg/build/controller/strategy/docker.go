@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
 
 	buildv1 "github.com/openshift/api/build/v1"
 	buildutil "github.com/openshift/openshift-controller-manager/pkg/build/buildutil"
@@ -26,7 +27,8 @@ func init() {
 
 // DockerBuildStrategy creates a Docker build using a Docker builder image.
 type DockerBuildStrategy struct {
-	Image string
+	Image      string
+	KubeClient *clientset.Clientset
 }
 
 // CreateBuildPod creates the pod to be used for the Docker build

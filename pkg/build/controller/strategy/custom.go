@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
 
 	buildv1 "github.com/openshift/api/build/v1"
 	buildutil "github.com/openshift/openshift-controller-manager/pkg/build/buildutil"
@@ -30,6 +31,7 @@ func init() {
 
 // CustomBuildStrategy creates a build using a custom builder image.
 type CustomBuildStrategy struct {
+	KubeClient *clientset.Clientset
 }
 
 // CreateBuildPod creates the pod to be used for the Custom build

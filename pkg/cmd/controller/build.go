@@ -65,13 +65,17 @@ func RunBuildController(ctx *ControllerContext) (bool, error) {
 		KubeClient:                         externalKubeClient,
 		BuildClient:                        buildClient,
 		DockerBuildStrategy: &buildstrategy.DockerBuildStrategy{
-			Image: imageTemplate.ExpandOrDie("docker-builder"),
+			Image:      imageTemplate.ExpandOrDie("docker-builder"),
+			KubeClient: externalKubeClient,
 		},
 		SourceBuildStrategy: &buildstrategy.SourceBuildStrategy{
 			Image:          imageTemplate.ExpandOrDie("docker-builder"),
 			SecurityClient: securityClient.SecurityV1(),
+			KubeClient:     externalKubeClient,
 		},
-		CustomBuildStrategy:      &buildstrategy.CustomBuildStrategy{},
+		CustomBuildStrategy: &buildstrategy.CustomBuildStrategy{
+			KubeClient: externalKubeClient,
+		},
 		BuildDefaults:            builddefaults.BuildDefaults{Config: ctx.OpenshiftControllerConfig.Build.BuildDefaults},
 		BuildOverrides:           buildoverrides.BuildOverrides{Config: ctx.OpenshiftControllerConfig.Build.BuildOverrides},
 		InternalRegistryHostname: ctx.OpenshiftControllerConfig.DockerPullSecret.InternalRegistryHostname,

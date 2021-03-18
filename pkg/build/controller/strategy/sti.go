@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientset "k8s.io/client-go/kubernetes"
 
 	buildv1 "github.com/openshift/api/build/v1"
 	securityv1 "github.com/openshift/api/security/v1"
@@ -20,6 +21,7 @@ import (
 type SourceBuildStrategy struct {
 	Image          string
 	SecurityClient securityclient.SecurityV1Interface
+	KubeClient     *clientset.Clientset
 }
 
 // DefaultDropCaps is the list of capabilities to drop if the current user cannot run as root
