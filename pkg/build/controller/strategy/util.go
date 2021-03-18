@@ -479,7 +479,6 @@ func setupContainersStorage(pod *corev1.Pod, container *corev1.Container) {
 			MountPath: "/var/lib/containers/storage",
 		},
 	)
-	container.Env = append(container.Env, corev1.EnvVar{Name: "BUILD_STORAGE_DRIVER", Value: "overlay"})
 }
 
 // setupContainersNodeStorage borrows the appropriate storage directories from the node so

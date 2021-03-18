@@ -101,7 +101,6 @@ func testSTICreateBuildPod(t *testing.T, rootAllowed bool) {
 		"BUILD_REGISTRIES_DIR_PATH":   "",
 		"BUILD_SIGNATURE_POLICY_PATH": "",
 		"BUILD_STORAGE_CONF_PATH":     "",
-		"BUILD_STORAGE_DRIVER":        "",
 		"BUILD_BLOBCACHE_DIR":         "",
 		"BUILD_MOUNT_ETC_PKI_CATRUST": "",
 	}
